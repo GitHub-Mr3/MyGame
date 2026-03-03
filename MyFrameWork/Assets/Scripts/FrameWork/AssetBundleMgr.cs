@@ -39,13 +39,34 @@ namespace Mr3
         private readonly Dictionary<string, Dictionary<string, Object>> _resourceCache = 
             new Dictionary<string, Dictionary<string, Object>>();
 
+        // 内存使用监控
+        private long _cachedResourceSize = 0;
+        private const long MAX_CACHE_SIZE = 100 * 1024 * 1024; // 100MB
+
+        /// <summary>
+        /// 设置AB包主路径
+        /// </summary>
+        /// <param name="path">AB包路径</param>
+        /// <param name="mainBundleName">主AB包文件名</param>
+        public void SetAssetBundlePath(string path, string mainBundleName)
+        {
+            _mainAssetBundlePath = path?.TrimEnd('/', '\\') + "/";
+            _mainAssetBundleName = mainBundleName;
+        }
+
         /// <summary>
         /// 初始化AB管理器，加载主AB包和清单文件
         /// </summary>
         public void Init()
         {
+            if (string.IsNullOrEmpty(_mainAssetBundlePath) || string.IsNullOrEmpty(_mainAssetBundleName))
+            {
+                Debug.LogError("[AssetBundleMgr] AB包路径或主包名未设置");
+                return;
+            }
+
             DisposeAllBundles();
-            DebugMgr.Instance.Log($"_mainAssetBundlePath: {_mainAssetBundlePath}");
+            Debug.Log($"[AssetBundleMgr] 初始化路径: {_mainAssetBundlePath}, 主包: {_mainAssetBundleName}");
             LoadManifest();
         }
 
@@ -54,10 +75,29 @@ namespace Mr3
         /// </summary>
         private void DisposeAllBundles()
         {
-            DebugMgr.Instance.Log("开始释放所有AB资源");
-            AssetBundle.UnloadAllAssetBundles(true);
+            Debug.Log("[AssetBundleMgr] 开始释放所有AB资源");
+            
+            // 清理缓存
+            _resourceCache.Clear();
+            _cachedResourceSize = 0;
+            
+            // 卸载所有AB包
+            foreach (var kvp in _assetBundleCache)
+            {
+                kvp.Value?.Unload(false);
+            }
+            _assetBundleCache.Clear();
+            
+            // 卸载主AB包
+            _mainAB?.Unload(false);
+            _mainAB = null;
+            _manifest = null;
+            
+            // 强制垃圾回收
             Resources.UnloadUnusedAssets();
-            DebugMgr.Instance.Log("完成释放未使用的资源");
+            System.GC.Collect();
+            
+            Debug.Log("[AssetBundleMgr] 完成释放所有资源");
         }
 
         /// <summary>
@@ -67,22 +107,29 @@ namespace Mr3
         {
             if (_mainAB != null) return;
 
-            string manifestPath = _mainAssetBundlePath + _mainAssetBundleName;
-            if (string.IsNullOrEmpty(manifestPath))
+            string manifestPath = Path.Combine(_mainAssetBundlePath, _mainAssetBundleName);
+            if (!File.Exists(manifestPath))
             {
-                DebugMgr.Instance.LogError("主AB包路径为空");
+                Debug.LogError($"[AssetBundleMgr] 主AB包不存在: {manifestPath}");
                 return;
             }
 
-            _mainAB = AssetBundle.LoadFromFile(manifestPath);
-            if (_mainAB != null)
+            try
             {
-                _manifest = _mainAB.LoadAsset<AssetBundleManifest>("AssetBundleManifest");
-                _mainAB.Unload(false); // 卸载主AB包但保留清单
+                _mainAB = AssetBundle.LoadFromFile(manifestPath);
+                if (_mainAB != null)
+                {
+                    _manifest = _mainAB.LoadAsset<AssetBundleManifest>("AssetBundleManifest");
+                    Debug.Log($"[AssetBundleMgr] 成功加载清单文件，包含 {_manifest?.GetAllAssetBundles().Length ?? 0} 个AB包");
+                }
+                else
+                {
+                    Debug.LogError($"[AssetBundleMgr] 无法加载主AB包: {manifestPath}");
+                }
             }
-            else
+            catch (Exception ex)
             {
-                DebugMgr.Instance.LogError($"无法加载主AB包: {manifestPath}");
+                Debug.LogError($"[AssetBundleMgr] 加载主AB包异常: {ex}");
             }
         }
 
@@ -94,13 +141,20 @@ namespace Mr3
         {
             if (_manifest == null)
             {
-                DebugMgr.Instance.LogError("AB清单未加载");
+                Debug.LogError("[AssetBundleMgr] AB清单未加载");
                 return;
             }
 
+            if (string.IsNullOrEmpty(abName))
+            {
+                Debug.LogError("[AssetBundleMgr] AB包名称为空");
+                return;
+            }
+
+            // 检查AB包是否存在
             if (!_manifest.GetAllAssetBundles().Contains(abName))
             {
-                DebugMgr.Instance.Log($"AB包不存在: {abName}");
+                Debug.LogWarning($"[AssetBundleMgr] AB包不存在: {abName}");
                 return;
             }
 
@@ -127,16 +181,29 @@ namespace Mr3
         /// <param name="abName">AB包名称</param>
         private void LoadSingleAssetBundle(string abName)
         {
-            string filePath = _mainAssetBundlePath + abName;
-            AssetBundle ab = AssetBundle.LoadFromFile(filePath);
-            if (ab != null)
+            string filePath = Path.Combine(_mainAssetBundlePath, abName);
+            if (!File.Exists(filePath))
             {
-                _assetBundleCache[abName] = ab;
-                DebugMgr.Instance.Log($"成功加载AB包: {abName}");
+                Debug.LogError($"[AssetBundleMgr] AB包文件不存在: {filePath}");
+                return;
             }
-            else
+
+            try
             {
-                DebugMgr.Instance.LogError($"加载AB包失败: {filePath}");
+                AssetBundle ab = AssetBundle.LoadFromFile(filePath);
+                if (ab != null)
+                {
+                    _assetBundleCache[abName] = ab;
+                    Debug.Log($"[AssetBundleMgr] 成功加载AB包: {abName}");
+                }
+                else
+                {
+                    Debug.LogError($"[AssetBundleMgr] 加载AB包失败: {filePath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[AssetBundleMgr] 加载AB包异常 {abName}: {ex}");
             }
         }
 
@@ -151,7 +218,7 @@ namespace Mr3
         {
             if (string.IsNullOrEmpty(abName) || string.IsNullOrEmpty(resName))
             {
-                DebugMgr.Instance.LogError("AB包名或资源名为空");
+                Debug.LogError("[AssetBundleMgr] AB包名或资源名为空");
                 return null;
             }
 
@@ -159,7 +226,20 @@ namespace Mr3
             
             if (_assetBundleCache.TryGetValue(abName, out AssetBundle ab))
             {
-                return ab.LoadAsset<T>(resName);
+                try
+                {
+                    T resource = ab.LoadAsset<T>(resName);
+                    if (resource == null)
+                    {
+                        Debug.LogWarning($"[AssetBundleMgr] 资源未找到: {abName}/{resName}");
+                    }
+                    return resource;
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"[AssetBundleMgr] 加载资源异常 {abName}/{resName}: {ex}");
+                    return null;
+                }
             }
 
             return null;
@@ -176,7 +256,7 @@ namespace Mr3
         {
             if (string.IsNullOrEmpty(abName) || string.IsNullOrEmpty(resName))
             {
-                DebugMgr.Instance.LogError("AB包名或资源名为空");
+                Debug.LogError("[AssetBundleMgr] AB包名或资源名为空");
                 callBack?.Invoke(null);
                 return;
             }
@@ -218,20 +298,33 @@ namespace Mr3
 
             if (_assetBundleCache.TryGetValue(abName, out AssetBundle ab))
             {
-                AssetBundleRequest request = ab.LoadAssetAsync<T>(resName);
-                yield return request;
-
-                T loadedAsset = request.asset as T;
-                if (loadedAsset != null)
+                try
                 {
-                    // 缓存资源
-                    CacheResource(abName, resName, loadedAsset);
-                }
+                    AssetBundleRequest request = ab.LoadAssetAsync<T>(resName);
+                    yield return request;
 
-                callBack?.Invoke(loadedAsset);
+                    T loadedAsset = request.asset as T;
+                    if (loadedAsset != null)
+                    {
+                        // 缓存资源
+                        CacheResource(abName, resName, loadedAsset);
+                    }
+                    else
+                    {
+                        Debug.LogWarning($"[AssetBundleMgr] 异步加载资源为空: {abName}/{resName}");
+                    }
+
+                    callBack?.Invoke(loadedAsset);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"[AssetBundleMgr] 异步加载资源异常 {abName}/{resName}: {ex}");
+                    callBack?.Invoke(null);
+                }
             }
             else
             {
+                Debug.LogError($"[AssetBundleMgr] AB包未加载: {abName}");
                 callBack?.Invoke(null);
             }
         }
@@ -248,8 +341,37 @@ namespace Mr3
                     abCache = new Dictionary<string, Object>();
                     _resourceCache[abName] = abCache;
                 }
+                
+                // 估算资源大小（简化版）
+                _cachedResourceSize += 1024; // 假设每个资源约1KB
+                
                 abCache[resName] = resource;
+                
+                // 内存清理检查
+                CheckMemoryUsage();
             }
+        }
+
+        /// <summary>
+        /// 检查内存使用情况并清理
+        /// </summary>
+        private void CheckMemoryUsage()
+        {
+            if (_cachedResourceSize > MAX_CACHE_SIZE)
+            {
+                Debug.LogWarning($"[AssetBundleMgr] 缓存内存超限 ({_cachedResourceSize / 1024 / 1024}MB)，执行清理");
+                ClearResourceCache();
+            }
+        }
+
+        /// <summary>
+        /// 清理资源缓存
+        /// </summary>
+        private void ClearResourceCache()
+        {
+            _resourceCache.Clear();
+            _cachedResourceSize = 0;
+            Resources.UnloadUnusedAssets();
         }
 
         /// <summary>
@@ -270,7 +392,7 @@ namespace Mr3
                     _resourceCache.Remove(abName);
                 }
                 
-                DebugMgr.Instance.Log($"卸载AB包: {abName}");
+                Debug.Log($"[AssetBundleMgr] 卸载AB包: {abName}");
             }
         }
 
@@ -287,8 +409,35 @@ namespace Mr3
             
             _assetBundleCache.Clear();
             _resourceCache.Clear();
+            _cachedResourceSize = 0;
             _mainAB = null;
             _manifest = null;
+            
+            Resources.UnloadUnusedAssets();
+            Debug.Log("[AssetBundleMgr] 卸载所有AB包完成");
+        }
+
+        /// <summary>
+        /// 获取当前缓存的AB包数量
+        /// </summary>
+        /// <returns>AB包数量</returns>
+        public int GetCachedBundleCount()
+        {
+            return _assetBundleCache.Count;
+        }
+
+        /// <summary>
+        /// 获取当前缓存的资源数量
+        /// </summary>
+        /// <returns>资源数量</returns>
+        public int GetCachedResourceCount()
+        {
+            int count = 0;
+            foreach (var cache in _resourceCache.Values)
+            {
+                count += cache.Count;
+            }
+            return count;
         }
 
         /// <summary>
@@ -296,7 +445,7 @@ namespace Mr3
         /// </summary>
         public void Dispose()
         {
-            DebugMgr.Instance.Log("AssetBundleMgr Dispose");
+            Debug.Log("[AssetBundleMgr] Dispose");
             UnLoadAll(true);
         }
     }
