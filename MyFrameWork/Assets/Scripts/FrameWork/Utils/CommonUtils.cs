@@ -5,104 +5,183 @@ using UnityEngine;
 using UnityEngine.Networking;
 using UnityEngine.UI;
 
+/// <summary>
+/// 通用工具类 - 提供常用的游戏开发辅助功能
+/// </summary>
 public class CommonUtils : SingletonBase<CommonUtils>
 {
     private CommonUtils() { }
 
     /// <summary>
-    /// ����������ת����Բ������
+    /// 将方形坐标转换为圆形坐标（常用于虚拟摇杆控制）
+    /// 解决方形输入区域导致的对角线移动速度过快问题
     /// </summary>
-    /// <param name="input"></param>
-    /// <returns></returns>
+    /// <param name="input">输入的方形坐标 (-1 to 1)</param>
+    /// <returns>转换后的圆形坐标</returns>
     public Vector2 SquareToCircle(Vector2 input)
     {
+        // 防止输入超出范围
+        input = Vector2.ClampMagnitude(input, 1f);
+        
         Vector2 output = Vector2.zero;
-        output.x = input.x * Mathf.Sqrt(1 - (input.y * input.y) / 2.0f);
-        output.y = input.y * Mathf.Sqrt(1 - (input.x * input.x) / 2.0f);
+        output.x = input.x * Mathf.Sqrt(1f - (input.y * input.y) / 2f);
+        output.y = input.y * Mathf.Sqrt(1f - (input.x * input.x) / 2f);
         return output;
     }
 
     /// <summary>
-    ///�����ı������а�
+    /// 复制文本到系统剪贴板
     /// </summary>
-    /// <param name="str"></param>
-    public static void CopyText(string str)
+    /// <param name="text">要复制的文本内容</param>
+    public static void CopyText(string text)
     {
-        GUIUtility.systemCopyBuffer = str;
+        if (!string.IsNullOrEmpty(text))
+        {
+            GUIUtility.systemCopyBuffer = text;
+        }
     }
 
-    #region ����ͷ����ص���ʱ����
-    Texture2D bgTexture = null;
-    Sprite spr = null;
-    Dictionary<string, Texture> ImaTextureDic = new Dictionary<string, Texture>();
-    Dictionary<string, Sprite> ImgSpriteDic = new Dictionary<string, Sprite>();
-    Rect newRect = new Rect(0, 0, 0, 0);
-    Vector2 v2Size = new Vector2(0.5f, 0.5f);
+    #region 图片加载相关字段
+    private readonly Dictionary<string, Texture2D> _imageTextureCache = new Dictionary<string, Texture2D>();
+    private readonly Dictionary<string, Sprite> _imageSpriteCache = new Dictionary<string, Sprite>();
+    private static readonly Vector2 _pivotCenter = new Vector2(0.5f, 0.5f);
     #endregion
+
     /// <summary>
-    /// ͨ��URL��ַ����ͷ��
+    /// 通过URL异步加载图片并设置到指定的Image组件
     /// </summary>
-    /// <param name="url">url��ַ</param>
-    /// <param name="Image">Ҫ���õ����</param>
-    /// <param name="act">������ɵĻص�</param>
-    /// <param name="key">Ψһ�ļ�ֵ�������������</param>
-    /// <returns></returns>
-    IEnumerator IESetImageByUrl(string url, Image Image, Action act, string key)
+    /// <param name="url">图片URL地址</param>
+    /// <param name="targetImage">目标Image组件</param>
+    /// <param name="onComplete">加载完成回调</param>
+    /// <param name="cacheKey">缓存键值（建议使用URL本身）</param>
+    /// <returns>协程IEnumerator</returns>
+    public Coroutine LoadImageFromUrl(string url, Image targetImage, Action onComplete = null, string cacheKey = null)
     {
-
-        using (UnityWebRequest uwr = UnityWebRequestTexture.GetTexture(url))
+        if (string.IsNullOrEmpty(url) || targetImage == null)
         {
-            yield return uwr.SendWebRequest();
+            Debug.LogWarning("LoadImageFromUrl: Invalid parameters");
+            onComplete?.Invoke();
+            return null;
+        }
 
-            if (uwr.result == UnityWebRequest.Result.Success)
+        // 使用URL作为默认缓存键
+        cacheKey ??= url;
+
+        // 检查缓存
+        if (_imageSpriteCache.TryGetValue(cacheKey, out Sprite cachedSprite))
+        {
+            targetImage.sprite = cachedSprite;
+            onComplete?.Invoke();
+            return null;
+        }
+
+        return StartCoroutine(LoadImageCoroutine(url, targetImage, onComplete, cacheKey));
+    }
+
+    private IEnumerator LoadImageCoroutine(string url, Image targetImage, Action onComplete, string cacheKey)
+    {
+        using (UnityWebRequest request = UnityWebRequestTexture.GetTexture(url))
+        {
+            yield return request.SendWebRequest();
+
+            if (request.result == UnityWebRequest.Result.Success)
             {
-                bgTexture = DownloadHandlerTexture.GetContent(uwr);
-                newRect.width = bgTexture.width;
-                newRect.height = bgTexture.height;
-                spr = Sprite.Create(bgTexture, newRect, v2Size);
-
-                if (ImaTextureDic.ContainsKey(key))
+                Texture2D texture = DownloadHandlerTexture.GetContent(request);
+                
+                if (texture != null)
                 {
-                    UnityEngine.Object.Destroy(ImaTextureDic[key]);
+                    // 创建Sprite
+                    Rect rect = new Rect(0, 0, texture.width, texture.height);
+                    Sprite sprite = Sprite.Create(texture, rect, _pivotCenter);
 
+                    // 清理旧缓存
+                    ClearCacheEntry(cacheKey);
+
+                    // 添加到缓存
+                    _imageTextureCache[cacheKey] = texture;
+                    _imageSpriteCache[cacheKey] = sprite;
+
+                    // 应用到Image
+                    if (targetImage != null)
+                    {
+                        targetImage.sprite = sprite;
+                    }
+
+                    onComplete?.Invoke();
                 }
-                if (ImgSpriteDic.ContainsKey(key))
+                else
                 {
-                    UnityEngine.Object.Destroy(ImgSpriteDic[key]);
-
-                }
-                ImaTextureDic[key] = bgTexture;
-                ImgSpriteDic[key] = spr;
-
-                if (Image != null)
-                {
-                    Image.sprite = spr;
-                    act?.Invoke();
+                    Debug.LogError($"Failed to create texture from URL: {url}");
+                    onComplete?.Invoke();
                 }
             }
             else
             {
-                DebugMgr.Instance.Log($"SetImageByUrl Load error: {uwr.error}, load path: {url}");
+                Debug.LogError($"Failed to load image from URL: {url}, Error: {request.error}");
+                onComplete?.Invoke();
             }
-            uwr.Dispose();
         }
     }
 
-    private void ClearImgByUrlCache()
+    /// <summary>
+    /// 清理指定键值的缓存条目
+    /// </summary>
+    /// <param name="cacheKey">缓存键值</param>
+    private void ClearCacheEntry(string cacheKey)
     {
-        List<string> vs = new List<string>();
-        foreach (var item in ImaTextureDic)
+        if (_imageTextureCache.ContainsKey(cacheKey))
         {
-            vs.Add(item.Key);
+            if (_imageTextureCache[cacheKey] != null)
+            {
+                UnityEngine.Object.Destroy(_imageTextureCache[cacheKey]);
+            }
+            _imageTextureCache.Remove(cacheKey);
         }
-        for (int i = 0; i < vs.Count; i++)
+
+        if (_imageSpriteCache.ContainsKey(cacheKey))
         {
-            UnityEngine.Object.Destroy(ImaTextureDic[vs[i]]);
-            UnityEngine.Object.Destroy(ImgSpriteDic[vs[i]]);
+            if (_imageSpriteCache[cacheKey] != null)
+            {
+                UnityEngine.Object.Destroy(_imageSpriteCache[cacheKey]);
+            }
+            _imageSpriteCache.Remove(cacheKey);
         }
-        vs.Clear();
-        ImaTextureDic.Clear();
-        ImgSpriteDic.Clear();
     }
 
+    /// <summary>
+    /// 清理所有图片缓存（释放内存）
+    /// 建议在场景切换或内存紧张时调用
+    /// </summary>
+    public void ClearAllImageCache()
+    {
+        foreach (var texture in _imageTextureCache.Values)
+        {
+            if (texture != null)
+            {
+                UnityEngine.Object.Destroy(texture);
+            }
+        }
+        
+        foreach (var sprite in _imageSpriteCache.Values)
+        {
+            if (sprite != null)
+            {
+                UnityEngine.Object.Destroy(sprite);
+            }
+        }
+
+        _imageTextureCache.Clear();
+        _imageSpriteCache.Clear();
+        
+        Debug.Log("All image cache cleared");
+    }
+
+    /// <summary>
+    /// 获取当前缓存的图片数量
+    /// </summary>
+    /// <returns>缓存中的图片数量</returns>
+    public int GetCacheCount()
+    {
+        return _imageSpriteCache.Count;
+    }
 }
